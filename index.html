@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solana 地址日交易统计工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-50 min-h-screen text-gray-800">
+
+<div class="max-w-4xl mx-auto py-12 px-4">
+    <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+        <h1 class="text-2xl font-bold text-gray-900 mb-2 flex items-center">
+            <span class="mr-2">📊</span> Solana 地址日交易统计
+        </h1>
+        <p class="text-sm text-gray-500 mb-6">输入 Solana 钱包地址，获取该地址最近的每日交易活跃度统计。</p>
+
+        <div class="flex flex-col md:flex-row gap-3">
+            <input
+                    type="text"
+                    id="addressInput"
+                    placeholder="请输入 SOL 钱包地址 (如: 675kPX...)"
+                    class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-purple-500 focus:outline-none"
+            >
+            <button
+                    onclick="fetchStats()"
+                    id="btnText"
+                    class="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-6 rounded-lg transition duration-200 disabled:opacity-50"
+            >
+                开始分析
+            </button>
+        </div>
+        <p id="status" class="mt-3 text-sm text-purple-600 font-medium"></p>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-lg p-6">
+        <canvas id="txChart" width="400" height="200"></canvas>
+        <div id="emptyState" class="py-20 text-center text-gray-400">
+            暂无数据，请在上方输入地址并点击分析
+        </div>
+    </div>
+</div>
+
+<script>
+
+// 1. 禁用鼠标右键
+document.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+}, false);
+
+// 2. 禁用 F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+U (查看源码)
+document.addEventListener('keydown', function(e) {
+    // 拦截 F12
+    if (e.key === "F12") {
+        e.preventDefault();
+        return false;
+    }
+    // 拦截 Ctrl+Shift+I (Chrome/Edge/Brave 开发者工具)
+    if (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i')) {
+        e.preventDefault();
+        return false;
+    }
+    // 拦截 Ctrl+Shift+J (控制台)
+    if (e.ctrlKey && e.shiftKey && (e.key === 'J' || e.key === 'j')) {
+        e.preventDefault();
+        return false;
+    }
+    // 拦截 Ctrl+U (查看源代码)
+    if (e.ctrlKey && (e.key === 'U' || e.key === 'u')) {
+        e.preventDefault();
+        return false;
+    }
+    // 拦截 Cmd+Option+I (Mac 用户常用)
+    if (e.metaKey && e.altKey && (e.key === 'I' || e.key === 'i')) {
+        e.preventDefault();
+        return false;
+    }
+}, false);
+
+    let myChart = null;
+
+    async function fetchStats() {
+    const address = document.getElementById('addressInput').value.trim();
+    const btn = document.getElementById('btnText');
+    const status = document.getElementById('status');
+    const emptyState = document.getElementById('emptyState');
+
+    if (!address) {
+        alert("请输入有效的 Solana 地址");
+        return;
+    }
+
+    // 初始化连接 (请确保换成你的 Helius URL)
+    const RPC_URL = "https://mainnet.helius-rpc.com/?api-key=401bf178-3c34-4f65-a0d1-bfdbeb9d3899";
+    const connection = new solanaWeb3.Connection(RPC_URL);
+    let pubKey = new solanaWeb3.PublicKey(address);
+
+    // 计算两周前的时间戳 (当前时间 - 14天)
+    const TWO_WEEKS_AGO = Math.floor(Date.now() / 1000) - (14 * 24 * 60 * 60);
+
+    btn.disabled = true;
+    btn.innerText = "分析中...";
+    status.innerText = "正在抓取最近两周的交易数据...";
+    emptyState.style.display = "none";
+
+    let allSignatures = [];
+    let lastSignature = null;
+    let keepFetching = true;
+
+    try {
+        while (keepFetching) {
+            const options = { limit: 1000 };
+            if (lastSignature) options.before = lastSignature;
+
+            const signatures = await connection.getSignaturesForAddress(pubKey, options);
+            
+            if (signatures.length === 0) break;
+
+            for (let sig of signatures) {
+                // 如果交易时间早于两周前，停止抓取
+                if (sig.blockTime < TWO_WEEKS_AGO) {
+                    keepFetching = false;
+                    break;
+                }
+
+                // --- 关键修改：剔除失败笔数 ---
+                if (sig.err === null) {
+                    allSignatures.push(sig);
+                }
+
+            }
+
+            lastSignature = signatures[signatures.length - 1].signature;
+
+            // 安全阀：防止某些极高频地址导致浏览器崩溃（限制最多抓取 10000 条）
+            if (allSignatures.length > 10000) {
+                status.innerText = "数据量过大，仅显示最近约 10,000 条记录...";
+                break;
+            }
+            
+            status.innerText = `已获取 ${allSignatures.length} 笔交易...`;
+        }
+
+        if (allSignatures.length === 0) {
+            status.innerText = "最近两周内该地址无交易。";
+            return;
+        }
+
+        // 统计每日数据
+        const stats = {};
+        allSignatures.forEach(sig => {
+            const date = new Date(sig.blockTime * 1000).toLocaleDateString('zh-CN');
+            stats[date] = (stats[date] || 0) + 1;
+        });
+
+        // 排序并格式化图表
+        const sortedData = Object.entries(stats)
+            .map(([date, count]) => ({ date, count }))
+            .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+        renderChart(sortedData);
+        status.innerText = `完成！共统计了两周内 ${allSignatures.length} 笔交易。`;
+
+    } catch (err) {
+        console.error(err);
+        status.innerText = "错误: " + err.message;
+    } finally {
+        btn.disabled = false;
+        btn.innerText = "开始分析";
+    }
+}
+
+    function renderChart(data) {
+        const ctx = document.getElementById('txChart').getContext('2d');
+
+        // 如果已有图表则销毁重绘
+        if (myChart) {
+            myChart.destroy();
+        }
+
+        myChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: data.map(d => d.date),
+                datasets: [{
+                    label: '每日交易笔数',
+                    data: data.map(d => d.count),
+                    backgroundColor: 'rgba(139, 92, 246, 0.6)',
+                    borderColor: 'rgb(139, 92, 246)',
+                    borderWidth: 1,
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: { stepSize: 1 }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { mode: 'index', intersect: false }
+                }
+            }
+        });
+    }
+</script>
+</body>
+</html>

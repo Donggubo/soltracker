@@ -53,12 +53,12 @@
         let myChart = null;
         let currentStats = {}; // 全局存储统计数据
         let subscriptionId = null; // WebSocket 订阅 ID
+        let processedSignatures = new Set(); // 新增：用于实时去重
 
         async function fetchStats() {
             const address = document.getElementById('addressInput').value.trim();
             const btn = document.getElementById('btnText');
             const status = document.getElementById('status');
-            const emptyState = document.getElementById('emptyState');
             const liveBadge = document.getElementById('liveBadge');
 
             if (!address) {
@@ -70,18 +70,22 @@
             const connection = new solanaWeb3.Connection(RPC_URL, 'confirmed');
             let pubKey = new solanaWeb3.PublicKey(address);
 
-            // 清理旧的订阅
+            // --- 修复点 1：彻底清理旧订阅 ---
             if (subscriptionId !== null) {
-                connection.removeOnLogsListener(subscriptionId);
-                liveBadge.classList.add('hidden');
+                try {
+                    await connection.removeOnLogsListener(subscriptionId);
+                    console.log("已清理旧监听器");
+                } catch (e) { console.error("注销失败:", e); }
+                subscriptionId = null;
             }
+            processedSignatures.clear(); // 清空去重集合
+            liveBadge.classList.add('hidden');
 
             const TWO_WEEKS_AGO = Math.floor(Date.now() / 1000) - (14 * 24 * 60 * 60);
 
             btn.disabled = true;
             btn.innerText = "历史抓取中...";
             status.innerText = "正在获取最近两周的历史数据...";
-            emptyState.style.display = "none";
             currentStats = {};
 
             let allSignatures = [];
@@ -102,6 +106,8 @@
                             const date = new Date(sig.blockTime * 1000).toLocaleDateString('zh-CN');
                             currentStats[date] = (currentStats[date] || 0) + 1;
                             allSignatures.push(sig);
+                            // 将历史数据的签名也加入去重集合，防止实时监听搜到重复的
+                            processedSignatures.add(sig.signature);
                         }
                     }
                     lastSignature = signatures[signatures.length - 1].signature;
@@ -109,19 +115,23 @@
                     status.innerText = `已获取 ${allSignatures.length} 笔历史交易...`;
                 }
 
-                // 排序并初始渲染
                 renderChart();
-                status.innerText = "历史统计完成，已开启实时监控！";
+                status.innerText = "监控中：实时同步已开启";
                 liveBadge.classList.remove('hidden');
 
-                // --- 开启实时监听逻辑 ---
+                // --- 修复点 2：添加签名去重校验 ---
                 subscriptionId = connection.onLogs(pubKey, (logs) => {
-                    if (logs.err === null) {
-                        const today = new Date().toLocaleDateString('zh-CN');
-                        currentStats[today] = (currentStats[today] || 0) + 1;
-                        console.log("检测到新交易！", logs.signature);
-                        renderChart(); // 更新图表
+                    // 如果交易失败，或者该签名已经处理过，直接跳过
+                    if (logs.err !== null || processedSignatures.has(logs.signature)) {
+                        return;
                     }
+
+                    processedSignatures.add(logs.signature); // 标记为已处理
+                    const today = new Date().toLocaleDateString('zh-CN');
+                    currentStats[today] = (currentStats[today] || 0) + 1;
+
+                    console.log("实时捕获唯一交易:", logs.signature);
+                    renderChart();
                 }, 'confirmed');
 
             } catch (err) {
